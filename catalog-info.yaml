@@ -1,0 +1,11 @@
+apiVersion: backstage.io/v1alpha1
+kind: Location
+metadata:
+  name: dsgpay-templates
+  description: DSGPay Backstage Software Templates
+spec:
+  targets:
+    - ./templates/internal-api/template.yaml
+    - ./templates/web/template.yaml
+    - ./templates/mq-consumer/template.yaml
+    - ./templates/cronjob/template.yaml
