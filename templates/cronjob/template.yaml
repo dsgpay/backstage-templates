@@ -1,0 +1,132 @@
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: cronjob
+  title: Scheduled CronJob
+  description: Periodic task run on a cron schedule. Creates a GitHub repo and opens a PR on prod-gitops.
+  tags:
+    - cronjob
+    - scheduled
+spec:
+  owner: group:default/it
+  type: service
+
+  parameters:
+    - title: CronJob Details
+      required: [serviceName, action, schedule, description, ecrImageName, owner]
+      properties:
+        serviceName:
+          title: Service Name
+          type: string
+          description: "e.g. compliance-dormant"
+          pattern: "^[a-z][a-z0-9-]*$"
+        action:
+          title: Action
+          type: string
+          description: "e.g. send-reminder — combined: cronjobs-{serviceName}-{action}"
+          pattern: "^[a-z][a-z0-9-]*$"
+        schedule:
+          title: Cron Schedule
+          type: string
+          description: "e.g. 0 0 1 * *  (minute hour day month weekday)"
+          default: "0 0 * * *"
+        description:
+          title: Description
+          type: string
+        ecrImageName:
+          title: ECR Image Name
+          type: string
+          description: "e.g. dsgpay/compliance-dormant"
+        owner:
+          title: Owner
+          type: string
+          default: "group:default/it"
+
+  steps:
+    - id: fetchServiceRepo
+      name: Scaffold service repo files
+      action: fetch:template
+      input:
+        url: ./skeleton/service-repo
+        values:
+          serviceName: ${{ parameters.serviceName }}
+          description: ${{ parameters.description }}
+          ecrImageName: ${{ parameters.ecrImageName }}
+          owner: ${{ parameters.owner }}
+          gitopsDeploymentPath: "prod-dsg/dsg-api/standalone/${{ parameters.serviceName }}/cronjobs-${{ parameters.serviceName }}-${{ parameters.action }}-cronjob.yaml"
+
+    - id: publishServiceRepo
+      name: Create service GitHub repo
+      action: publish:github
+      input:
+        allowedHosts: [github.com]
+        repoUrl: "github.com?owner=dsgpay&repo=${{ parameters.serviceName }}"
+        description: ${{ parameters.description }}
+        defaultBranch: main
+        repoVisibility: private
+
+    - id: fetchGitopsManifests
+      name: Scaffold CronJob manifest
+      action: fetch:template
+      input:
+        url: ./skeleton/gitops
+        targetPath: manifests
+        values:
+          serviceName: ${{ parameters.serviceName }}
+          action: ${{ parameters.action }}
+          schedule: ${{ parameters.schedule }}
+          ecrImageName: ${{ parameters.ecrImageName }}
+
+    - id: prManifests
+      name: PR — CronJob manifest to prod-gitops
+      action: publish:github:pull-request
+      input:
+        repoUrl: "github.com?owner=dsgpay&repo=prod-gitops"
+        title: "feat: add cronjobs-${{ parameters.serviceName }}-${{ parameters.action }}"
+        branchName: "feat/add-cronjob-${{ parameters.serviceName }}-${{ parameters.action }}"
+        description: |
+          New CronJob: cronjobs-${{ parameters.serviceName }}-${{ parameters.action }}
+          Schedule: ${{ parameters.schedule }}
+          Owner: ${{ parameters.owner }}
+        sourcePath: manifests
+        targetPath: "prod-dsg/dsg-api/standalone/${{ parameters.serviceName }}"
+
+    - id: fetchArgoApp
+      name: Scaffold ArgoCD application
+      action: fetch:template
+      input:
+        url: ./skeleton/argocd
+        targetPath: argocd
+        values:
+          serviceName: ${{ parameters.serviceName }}
+          action: ${{ parameters.action }}
+
+    - id: prArgoApp
+      name: PR — ArgoCD application to prod-gitops
+      action: publish:github:pull-request
+      input:
+        repoUrl: "github.com?owner=dsgpay&repo=prod-gitops"
+        title: "feat: add ArgoCD app for ${{ parameters.serviceName }}-${{ parameters.action }}"
+        branchName: "feat/argocd-${{ parameters.serviceName }}-${{ parameters.action }}"
+        description: "ArgoCD Application for ${{ parameters.serviceName }}-${{ parameters.action }}"
+        sourcePath: argocd
+        targetPath: "control-room/active"
+
+    - id: registerCatalog
+      name: Register in Backstage catalog
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps.publishServiceRepo.output.repoContentsUrl }}
+        catalogInfoPath: /catalog-info.yaml
+
+  output:
+    links:
+      - title: Service Repository
+        url: ${{ steps.publishServiceRepo.output.remoteUrl }}
+      - title: prod-gitops manifests PR
+        url: ${{ steps.prManifests.output.remoteUrl }}
+      - title: prod-gitops ArgoCD PR
+        url: ${{ steps.prArgoApp.output.remoteUrl }}
+      - title: Open in catalog
+        icon: catalog
+        entityRef: ${{ steps.registerCatalog.output.entityRef }}
