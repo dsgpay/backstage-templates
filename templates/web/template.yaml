@@ -1,0 +1,143 @@
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: web
+  title: Web / Customer-Facing Service
+  description: Frontend or customer-facing API exposed publicly via AWS ALB. Creates a GitHub repo and opens a PR on prod-gitops.
+  tags:
+    - web
+    - public
+spec:
+  owner: group:default/it
+  type: website
+
+  parameters:
+    - title: Service Details
+      required: [serviceName, description, port, hostname, acmCertArn, ecrImageName, resourceSize, owner]
+      properties:
+        serviceName:
+          title: Service Name
+          type: string
+          pattern: "^[a-z][a-z0-9-]*$"
+        description:
+          title: Description
+          type: string
+        port:
+          title: Container Port
+          type: number
+          default: 3000
+        hostname:
+          title: Public Hostname
+          type: string
+          description: "e.g. admin.dsgpay.com"
+        acmCertArn:
+          title: ACM Certificate ARN
+          type: string
+          description: "e.g. arn:aws:acm:ap-southeast-1:589962364545:certificate/xxxx"
+        ecrImageName:
+          title: ECR Image Name
+          type: string
+        resourceSize:
+          title: Resource Size
+          type: string
+          enum: [small, medium, large]
+          enumNames:
+            - "Small (50m/150m CPU, 100Mi/300Mi memory)"
+            - "Medium (200m/400m CPU, 400Mi/800Mi memory)"
+            - "Large (400m/800m CPU, 800Mi/1024Mi memory)"
+          default: small
+        owner:
+          title: Owner
+          type: string
+          default: "group:default/it"
+
+  steps:
+    - id: fetchServiceRepo
+      name: Scaffold service repo files
+      action: fetch:template
+      input:
+        url: ./skeleton/service-repo
+        values:
+          serviceName: ${{ parameters.serviceName }}
+          description: ${{ parameters.description }}
+          ecrImageName: ${{ parameters.ecrImageName }}
+          owner: ${{ parameters.owner }}
+          gitopsDeploymentPath: "prod-dsg/dsg-web/${{ parameters.serviceName }}/${{ parameters.serviceName }}-deployment.yaml"
+
+    - id: publishServiceRepo
+      name: Create service GitHub repo
+      action: publish:github
+      input:
+        allowedHosts: [github.com]
+        repoUrl: "github.com?owner=dsgpay&repo=${{ parameters.serviceName }}"
+        description: ${{ parameters.description }}
+        defaultBranch: main
+        repoVisibility: private
+
+    - id: fetchGitopsManifests
+      name: Scaffold K8s manifests
+      action: fetch:template
+      input:
+        url: ./skeleton/gitops
+        targetPath: manifests
+        values:
+          serviceName: ${{ parameters.serviceName }}
+          port: ${{ parameters.port }}
+          hostname: ${{ parameters.hostname }}
+          acmCertArn: ${{ parameters.acmCertArn }}
+          ecrImageName: ${{ parameters.ecrImageName }}
+          resourceSize: ${{ parameters.resourceSize }}
+
+    - id: prManifests
+      name: PR — K8s manifests to prod-gitops
+      action: publish:github:pull-request
+      input:
+        repoUrl: "github.com?owner=dsgpay&repo=prod-gitops"
+        title: "feat: add ${{ parameters.serviceName }} web service manifests"
+        branchName: "feat/add-${{ parameters.serviceName }}"
+        description: |
+          New web service: ${{ parameters.serviceName }}
+          Hostname: ${{ parameters.hostname }}
+          Owner: ${{ parameters.owner }}
+          Scaffolded from Backstage web template.
+        sourcePath: manifests
+        targetPath: "prod-dsg/dsg-web/${{ parameters.serviceName }}"
+
+    - id: fetchArgoApp
+      name: Scaffold ArgoCD application
+      action: fetch:template
+      input:
+        url: ./skeleton/argocd
+        targetPath: argocd
+        values:
+          serviceName: ${{ parameters.serviceName }}
+
+    - id: prArgoApp
+      name: PR — ArgoCD application to prod-gitops
+      action: publish:github:pull-request
+      input:
+        repoUrl: "github.com?owner=dsgpay&repo=prod-gitops"
+        title: "feat: add ArgoCD app for ${{ parameters.serviceName }}"
+        branchName: "feat/argocd-${{ parameters.serviceName }}"
+        description: "ArgoCD Application manifest for ${{ parameters.serviceName }}"
+        sourcePath: argocd
+        targetPath: "control-room/active"
+
+    - id: registerCatalog
+      name: Register in Backstage catalog
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps.publishServiceRepo.output.repoContentsUrl }}
+        catalogInfoPath: /catalog-info.yaml
+
+  output:
+    links:
+      - title: Service Repository
+        url: ${{ steps.publishServiceRepo.output.remoteUrl }}
+      - title: prod-gitops manifests PR
+        url: ${{ steps.prManifests.output.remoteUrl }}
+      - title: prod-gitops ArgoCD PR
+        url: ${{ steps.prArgoApp.output.remoteUrl }}
+      - title: Open in catalog
+        icon: catalog
+        entityRef: ${{ steps.registerCatalog.output.entityRef }}
