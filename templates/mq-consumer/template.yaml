@@ -60,7 +60,6 @@ spec:
       name: Create service GitHub repo
       action: publish:github
       input:
-        allowedHosts: [github.com]
         repoUrl: "github.com?owner=dsgpay&repo=mq-${{ parameters.vhost }}-${{ parameters.serviceName }}"
         description: ${{ parameters.description }}
         defaultBranch: main
