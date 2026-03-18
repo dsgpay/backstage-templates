@@ -1,0 +1,135 @@
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: mq-consumer
+  title: RabbitMQ Consumer
+  description: Service that consumes from a RabbitMQ queue with dead-letter retry pattern. Creates GitHub repo and opens PR on prod-gitops.
+  tags:
+    - rabbitmq
+    - consumer
+spec:
+  owner: group:default/it
+  type: service
+
+  parameters:
+    - title: Service Details
+      required: [serviceName, queueName, vhost, description, ecrImageName, owner]
+      properties:
+        serviceName:
+          title: Service Name (short)
+          type: string
+          description: "e.g. blacklist → full name becomes mq-collections-blacklist"
+          pattern: "^[a-z][a-z0-9-]*$"
+        queueName:
+          title: Queue Name
+          type: string
+          description: "Short queue name e.g. blacklist"
+        vhost:
+          title: RabbitMQ Vhost
+          type: string
+          enum: [collections, stp]
+          enumNames:
+            - "collections (payment collection flows)"
+            - "stp (straight-through processing)"
+        description:
+          title: Description
+          type: string
+        ecrImageName:
+          title: ECR Image Name
+          type: string
+          description: "e.g. dsgpay/mq-blacklist"
+        owner:
+          title: Owner
+          type: string
+          default: "group:default/it"
+
+  steps:
+    - id: fetchServiceRepo
+      name: Scaffold service repo files
+      action: fetch:template
+      input:
+        url: ./skeleton/service-repo
+        values:
+          serviceName: "mq-${{ parameters.vhost }}-${{ parameters.serviceName }}"
+          description: ${{ parameters.description }}
+          ecrImageName: ${{ parameters.ecrImageName }}
+          owner: ${{ parameters.owner }}
+          gitopsDeploymentPath: "prod-dsg/dsg-api/standalone/mq/${{ parameters.vhost }}/mq-${{ parameters.vhost }}-${{ parameters.serviceName }}/mq-${{ parameters.vhost }}-${{ parameters.serviceName }}-deployment.yaml"
+
+    - id: publishServiceRepo
+      name: Create service GitHub repo
+      action: publish:github
+      input:
+        allowedHosts: [github.com]
+        repoUrl: "github.com?owner=dsgpay&repo=mq-${{ parameters.vhost }}-${{ parameters.serviceName }}"
+        description: ${{ parameters.description }}
+        defaultBranch: main
+        repoVisibility: private
+
+    - id: fetchGitopsManifests
+      name: Scaffold K8s + RabbitMQ CRD manifests
+      action: fetch:template
+      input:
+        url: ./skeleton/gitops
+        targetPath: manifests
+        values:
+          serviceName: ${{ parameters.serviceName }}
+          vhost: ${{ parameters.vhost }}
+          fullName: "mq-${{ parameters.vhost }}-${{ parameters.serviceName }}"
+          queueName: ${{ parameters.queueName }}
+          ecrImageName: ${{ parameters.ecrImageName }}
+
+    - id: prManifests
+      name: PR — manifests to prod-gitops
+      action: publish:github:pull-request
+      input:
+        repoUrl: "github.com?owner=dsgpay&repo=prod-gitops"
+        title: "feat: add mq-${{ parameters.vhost }}-${{ parameters.serviceName }} consumer"
+        branchName: "feat/add-mq-${{ parameters.vhost }}-${{ parameters.serviceName }}"
+        description: |
+          New RabbitMQ consumer: mq-${{ parameters.vhost }}-${{ parameters.serviceName }}
+          Queue: ${{ parameters.queueName }} on vhost ${{ parameters.vhost }}
+          Owner: ${{ parameters.owner }}
+        sourcePath: manifests
+        targetPath: "prod-dsg/dsg-api/standalone/mq/${{ parameters.vhost }}/mq-${{ parameters.vhost }}-${{ parameters.serviceName }}"
+
+    - id: fetchArgoApp
+      name: Scaffold ArgoCD application
+      action: fetch:template
+      input:
+        url: ./skeleton/argocd
+        targetPath: argocd
+        values:
+          serviceName: ${{ parameters.serviceName }}
+          vhost: ${{ parameters.vhost }}
+          fullName: "mq-${{ parameters.vhost }}-${{ parameters.serviceName }}"
+
+    - id: prArgoApp
+      name: PR — ArgoCD application to prod-gitops
+      action: publish:github:pull-request
+      input:
+        repoUrl: "github.com?owner=dsgpay&repo=prod-gitops"
+        title: "feat: add ArgoCD app for mq-${{ parameters.vhost }}-${{ parameters.serviceName }}"
+        branchName: "feat/argocd-mq-${{ parameters.vhost }}-${{ parameters.serviceName }}"
+        description: "ArgoCD Application for mq-${{ parameters.vhost }}-${{ parameters.serviceName }}"
+        sourcePath: argocd
+        targetPath: "control-room/active"
+
+    - id: registerCatalog
+      name: Register in Backstage catalog
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps.publishServiceRepo.output.repoContentsUrl }}
+        catalogInfoPath: /catalog-info.yaml
+
+  output:
+    links:
+      - title: Service Repository
+        url: ${{ steps.publishServiceRepo.output.remoteUrl }}
+      - title: prod-gitops manifests PR
+        url: ${{ steps.prManifests.output.remoteUrl }}
+      - title: prod-gitops ArgoCD PR
+        url: ${{ steps.prArgoApp.output.remoteUrl }}
+      - title: Open in catalog
+        icon: catalog
+        entityRef: ${{ steps.registerCatalog.output.entityRef }}

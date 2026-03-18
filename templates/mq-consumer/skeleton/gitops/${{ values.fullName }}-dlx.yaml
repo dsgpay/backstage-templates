@@ -1,0 +1,27 @@
+# Dead Letter Exchange - receives failed messages from main queue
+apiVersion: rabbitmq.com/v1beta1
+kind: Exchange
+metadata:
+  name: ${{ values.vhost }}-${{ values.queueName }}-dlx
+  namespace: default
+spec:
+  name: ${{ values.queueName }}.DLX
+  vhost: ${{ values.vhost }}
+  type: topic
+  durable: true
+  rabbitmqClusterReference:
+    name: rabbitmq-cluster
+---
+# Retry Exchange - routes messages from DLQ back to main queue
+apiVersion: rabbitmq.com/v1beta1
+kind: Exchange
+metadata:
+  name: ${{ values.vhost }}-${{ values.queueName }}-retry-ex
+  namespace: default
+spec:
+  name: ${{ values.queueName }}.RETRY
+  vhost: ${{ values.vhost }}
+  type: topic
+  durable: true
+  rabbitmqClusterReference:
+    name: rabbitmq-cluster
