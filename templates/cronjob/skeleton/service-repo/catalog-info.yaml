@@ -6,6 +6,7 @@ metadata:
   annotations:
     github.com/project-slug: dsgpay/${{ values.serviceName }}
     backstage.io/kubernetes-id: ${{ values.serviceName }}
+    argocd/app-name: ${{ values.serviceName }}-${{ values.action }}
 spec:
   type: service
   lifecycle: production

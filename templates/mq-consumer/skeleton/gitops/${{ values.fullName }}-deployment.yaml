@@ -31,7 +31,7 @@ spec:
                   name: rabbitmq-user-bny3mk109inc-creds
                   key: password
             - name: RABBIT_MQ_URI
-              value: "amqp://$(RABBIT_MQ_USERNAME):$(RABBIT_MQ_PASSWORD)@rabbitmq-cluster.default.svc.cluster.local:5672/${{ values.vhost }}"
+              value: "amqp://$(RABBIT_MQ_USERNAME):$(RABBIT_MQ_PASSWORD)@rabbitmq26.default.svc.cluster.local:5672/${{ values.vhost }}"
             - name: RABBIT_MQ_QUEUE
               value: "${{ values.queueName }}"
           resources:
