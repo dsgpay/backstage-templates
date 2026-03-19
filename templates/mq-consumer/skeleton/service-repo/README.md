@@ -10,7 +10,7 @@ Push to `main` → builds Docker image → pushes to ECR → updates image tag d
 
 Before CI works, add these secrets to this repo (or as org-level secrets):
 - `AWS_ROLE_ARN` — IAM role ARN for OIDC authentication with ECR
-- `GITOPS_TOKEN` — GitHub token with `repo` scope on `dsgpay/prod-gitops` for updating deployments
+- `GITOPS_PAT` — GitHub token with `repo` scope on `dsgpay/prod-gitops` for updating deployments
 
 ## Resources
 
