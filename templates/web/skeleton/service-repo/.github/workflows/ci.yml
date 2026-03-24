@@ -1,74 +1,151 @@
-name: Build and Deploy
+{% raw %}
+name: Continuous integration (CI) - Prod
 
 on:
   push:
-    branches: [main]
+    branches: [ "main" ]
 
-permissions:
-  id-token: write
-  contents: read
+# Cancel in-progress runs for the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # Fail fast if build hangs
+
+    name: Prod Build
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout code at Pull request
+      uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ '${{' }} secrets.AWS_ACCESS_KEY_ID ${{ '}}' }}
-          aws-secret-access-key: ${{ '${{' }} secrets.AWS_SECRET_ACCESS_KEY ${{ '}}' }}
-          aws-region: ap-southeast-1
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ap-southeast-1
 
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Create ECR repository if not exists
-        run: |
-          aws ecr create-repository \
-            --repository-name ${{ values.ecrImageName }} \
-            --region ap-southeast-1 \
-            --image-scanning-configuration scanOnPush=true \
-            || true
+    - name: Generate build number
+      uses: einaregilsson/build-number@v3
+      with:
+        token: ${{ secrets.github_token }}
 
-      - name: Build and push Docker image
-        env:
-          ECR_REGISTRY: ${{ '${{' }} steps.login-ecr.outputs.registry ${{ '}}' }}
-          IMAGE_TAG: ${{ '${{' }} github.sha ${{ '}}' }}
-        run: |
-          docker build -t $ECR_REGISTRY/${{ values.ecrImageName }}:$IMAGE_TAG .
-          docker push $ECR_REGISTRY/${{ values.ecrImageName }}:$IMAGE_TAG
-          echo "IMAGE=$ECR_REGISTRY/${{ values.ecrImageName }}:$IMAGE_TAG" >> $GITHUB_ENV
+    - name: Print new build number
+      run: echo "Build number is $BUILD_NUMBER"
 
-      - name: Checkout prod-gitops
-        uses: actions/checkout@v4
-        with:
-          repository: dsgpay/prod-gitops
-          token: ${{ '${{' }} secrets.GITOPS_PAT ${{ '}}' }}
-          path: prod-gitops
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
 
-      - name: Update image tag in deployment.yaml
-        run: |
-          cd prod-gitops
-          sed -i "s|image: .*${{ values.ecrImageName }}:.*|image: $IMAGE|" \
-            ${{ values.gitopsDeploymentPath }}
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b update-${{ values.serviceName }}-${{ '${{' }} github.sha ${{ '}}' }}
-          git add ${{ values.gitopsDeploymentPath }}
-          git commit -m "chore: update ${{ values.serviceName }} to ${{ '${{' }} github.sha ${{ '}}' }}"
-          git push origin update-${{ values.serviceName }}-${{ '${{' }} github.sha ${{ '}}' }}
+    - name: Cache Docker layers
+      uses: actions/cache@v3
+      with:
+        path: /tmp/.buildx-cache
+        key: ${{ runner.os }}-buildx-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-buildx-
 
-      - name: Open PR on prod-gitops
-        env:
-          GH_TOKEN: ${{ '${{' }} secrets.GITOPS_PAT ${{ '}}' }}
-        run: |
-          gh pr create \
-            --repo dsgpay/prod-gitops \
-            --title "chore: update ${{ values.serviceName }} to ${{ '${{' }} github.sha ${{ '}}' }}" \
-            --body "Automated image update from ${{ '${{' }} github.repository ${{ '}}' }}@${{ '${{' }} github.sha ${{ '}}' }}" \
-            --base main \
-            --head update-${{ values.serviceName }}-${{ '${{' }} github.sha ${{ '}}' }}
+    - name: Build, tag, and push image to Amazon ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: ${{ github.repository }}
+      run: |
+        docker buildx build \
+          --platform linux/amd64 \
+          --cache-from type=registry,ref=$ECR_REGISTRY/$ECR_REPOSITORY:buildcache \
+          --cache-to type=registry,ref=$ECR_REGISTRY/$ECR_REPOSITORY:buildcache,mode=max \
+          --tag $ECR_REGISTRY/$ECR_REPOSITORY:$BUILD_NUMBER \
+          --tag $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+          --push \
+          --file Dockerfile \
+          .
+
+    - name: Print new ECR images
+      run: echo "ECR ${{ steps.login-ecr.outputs.registry }}/${{ github.repository }}:$BUILD_NUMBER"
+
+    - name: Install yq
+      run: |
+        sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+        sudo chmod +x /usr/local/bin/yq
+        yq --version
+
+    - name: Update ArgoCD Prod Config and Create PR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: ${{ github.repository }}
+        ARGOCD_REPO_TOKEN: ${{ secrets.ARGOCD_REPO_TOKEN }}
+        PROD_ECR_REGISTRY: "589962364545.dkr.ecr.ap-southeast-1.amazonaws.com"
+        GH_TOKEN: ${{ secrets.ARGOCD_REPO_TOKEN }}
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+        git clone --depth 1 --single-branch --branch main \
+          https://$ARGOCD_REPO_TOKEN@github.com/dsgpay/prod-gitops.git argocd-config
+        cd argocd-config
+
+        TARGET_IMAGE="$PROD_ECR_REGISTRY/$ECR_REPOSITORY:$BUILD_NUMBER"
+        echo "Target image for Prod: $TARGET_IMAGE"
+
+        SEARCH_PATTERN="$PROD_ECR_REGISTRY/$ECR_REPOSITORY:"
+        echo "Searching for EXACT pattern: $SEARCH_PATTERN"
+
+        FILES_TO_UPDATE=$(find . -type f \( -name "*.yaml" -o -name "*.yml" \) -exec grep -l -F "$SEARCH_PATTERN" {} + | head -10)
+
+        if [ -z "$FILES_TO_UPDATE" ]; then
+          echo "⚠️ No files found containing $SEARCH_PATTERN"
+          exit 0
+        fi
+
+        echo "Files found: $FILES_TO_UPDATE"
+
+        UPDATED_FILES=""
+        for file in $FILES_TO_UPDATE; do
+          CONTAINER_COUNT=$(yq eval '.spec.template.spec.containers | length' "$file" 2>/dev/null)
+          if [ "$CONTAINER_COUNT" = "0" ]; then continue; fi
+
+          EXACT_MATCH=$(yq eval '.spec.template.spec.containers[]?.image' "$file" 2>/dev/null | grep -F "$SEARCH_PATTERN" || true)
+          if [ -n "$EXACT_MATCH" ]; then
+            yq eval "(.spec.template.spec.containers[] | select(.image | test(\"^$PROD_ECR_REGISTRY/$ECR_REPOSITORY:[0-9]+$\")) | .image) = \"$TARGET_IMAGE\"" -i "$file"
+            UPDATED_FILES="$UPDATED_FILES $file"
+            continue
+          fi
+
+          EXACT_MATCH=$(yq eval '.spec.jobTemplate.spec.template.spec.containers[]?.image' "$file" 2>/dev/null | grep -F "$SEARCH_PATTERN" || true)
+          if [ -n "$EXACT_MATCH" ]; then
+            yq eval "(.spec.jobTemplate.spec.template.spec.containers[] | select(.image | test(\"^$PROD_ECR_REGISTRY/$ECR_REPOSITORY:[0-9]+$\")) | .image) = \"$TARGET_IMAGE\"" -i "$file"
+            UPDATED_FILES="$UPDATED_FILES $file"
+            continue
+          fi
+        done
+
+        if [ -z "$UPDATED_FILES" ]; then
+          echo "⚠️ No files were updated"
+          exit 0
+        fi
+
+        BRANCH_NAME="deploy/build-$BUILD_NUMBER-$(date +%s)"
+        git checkout -b "$BRANCH_NAME"
+        git add .
+        if git diff --staged --quiet; then
+          echo "No changes detected."
+          exit 0
+        fi
+
+        git commit -m "Update ${{ github.repository }} image to build $BUILD_NUMBER"
+        git push origin "$BRANCH_NAME"
+
+        gh pr create \
+          --repo dsgpay/prod-gitops \
+          --title "🚀 Deploy ${{ github.repository }} build $BUILD_NUMBER to Production" \
+          --body "**Image:** \`$TARGET_IMAGE\`
+        **Commit:** ${{ github.sha }}
+        **Files:** $UPDATED_FILES" \
+          --base main \
+          --head "$BRANCH_NAME"
+{% endraw %}
