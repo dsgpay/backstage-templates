@@ -1,0 +1,46 @@
+# Dead Letter Queue - holds failed messages for 5 minutes (300000ms)
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata:
+  name: ${{ values.vhost }}-${{ values.queueName }}-dlq
+  namespace: default
+spec:
+  name: ${{ values.queueName }}.DLQ
+  vhost: ${{ values.vhost }}
+  type: quorum
+  durable: true
+  arguments:
+    x-dead-letter-exchange: ${{ values.queueName }}.RETRY
+    x-message-ttl: 300000
+  rabbitmqClusterReference:
+    name: rabbitmq-cluster
+---
+# Binding: DLX -> DLQ
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata:
+  name: ${{ values.vhost }}-${{ values.queueName }}-dlx-to-dlq
+  namespace: default
+spec:
+  vhost: ${{ values.vhost }}
+  source: ${{ values.queueName }}.DLX
+  destination: ${{ values.queueName }}.DLQ
+  destinationType: queue
+  routingKey: ${{ values.queueName }}
+  rabbitmqClusterReference:
+    name: rabbitmq-cluster
+---
+# Binding: RETRY Exchange -> Main Queue
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata:
+  name: ${{ values.vhost }}-${{ values.queueName }}-retry-bind
+  namespace: default
+spec:
+  vhost: ${{ values.vhost }}
+  source: ${{ values.queueName }}.RETRY
+  destination: ${{ values.queueName }}
+  destinationType: queue
+  routingKey: ${{ values.queueName }}
+  rabbitmqClusterReference:
+    name: rabbitmq-cluster
